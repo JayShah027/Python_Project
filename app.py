@@ -20,11 +20,8 @@ LABELS_PATH = Path("models/labels.json")
 
 @st.cache_resource
 def ensure_model_available():
-    """
-    Ensure models/ contains a loadable model directory and labels.json.
-    If not present locally and an env var is provided, download a zip from Google Drive.
-    After extraction we attempt to auto-detect the model folder if its name differs.
-    """
+    global MODEL_DIR, LABELS_PATH   # <-- FIXED: declare globals first
+
     # already present?
     if MODEL_DIR.exists() and LABELS_PATH.exists():
         return True
@@ -39,72 +36,58 @@ def ensure_model_available():
     os.makedirs("models", exist_ok=True)
     zip_path = "models/model.zip"
 
-    # Build a drive download URL. gdown accepts the full url or an id with /uc?id=...
     url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
     st.info("Downloading model (this runs only once at startup)...")
-
-    # download (non-quiet so logs show in deployment)
     gdown.download(url, zip_path, quiet=False)
 
-    # extract
+    # extract zip
+    import zipfile
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
             z.extractall("models")
     except zipfile.BadZipFile as e:
-        # cleanup and re-raise with a helpful message
         if os.path.exists(zip_path):
             os.remove(zip_path)
         raise RuntimeError(f"Downloaded file is not a valid zip: {e}")
 
-    # cleanup zip
+    # cleanup
     try:
         os.remove(zip_path)
     except OSError:
         pass
 
-    # If MODEL_DIR is missing, try to auto-detect a saved model inside models/
+    # -------------------------------------------------------------
+    # AUTO-DETECT MODEL FILE OR FOLDER INSIDE models/
+    # -------------------------------------------------------------
     if not MODEL_DIR.exists():
-        # candidate types: directory containing saved_model.pb (SavedModel),
-        # or folder ending with .keras, or a .h5/.keras file
+        MODEL_DIR_resolved = None
+
         for entry in Path("models").iterdir():
             if entry.is_dir():
-                # SavedModel detection
                 if (entry / "saved_model.pb").exists():
                     MODEL_DIR_resolved = entry
                     break
-                # directory named *.keras (tf.keras export)
                 if entry.name.endswith(".keras"):
                     MODEL_DIR_resolved = entry
                     break
             else:
-                # single file model (e.g., model.h5)
                 if entry.suffix in {".h5", ".keras"}:
-                    # create a directory wrapper path for load_model
                     MODEL_DIR_resolved = entry
                     break
-        else:
-            MODEL_DIR_resolved = None
 
-        if MODEL_DIR_resolved:
-            # update global path variable in the filesystem (so load_model can use it)
-            # Note: we only set MODEL_DIR if a suitable candidate exists
-            global MODEL_DIR
-            MODEL_DIR = Path(MODEL_DIR_resolved)
-        else:
-            raise RuntimeError("Downloaded model is missing expected folders/files (no SavedModel/.keras/.h5 found).")
+        if MODEL_DIR_resolved is None:
+            raise RuntimeError("Downloaded model is missing expected files.")
 
+        MODEL_DIR = MODEL_DIR_resolved   # <-- update global
+
+    # -------------------------------------------------------------
+    # FIND LABELS.JSON ANYWHERE INSIDE models/
+    # -------------------------------------------------------------
     if not LABELS_PATH.exists():
-        # try to find a labels.json anywhere in models/
-        found = False
-        for p in Path("models").rglob("labels.json"):
-            LABELS_PATH_resolved = p
-            found = True
-            break
-        if found:
-            global LABELS_PATH
-            LABELS_PATH = Path(LABELS_PATH_resolved)
-        else:
-            raise RuntimeError("labels.json not found inside the downloaded model archive.")
+        found = list(Path("models").rglob("labels.json"))
+        if not found:
+            raise RuntimeError("labels.json not found inside model archive.")
+        LABELS_PATH = found[0]   # <-- update global
 
     return True
 
